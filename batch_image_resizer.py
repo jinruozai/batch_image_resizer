@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFileDialog, QListWidget, QLineEdit, QMessageBox, QSpinBox, QListWidgetItem
+    QFileDialog, QListWidget, QLineEdit, QMessageBox, QSpinBox, QListWidgetItem, QProgressBar
 )
 from PyQt5.QtCore import Qt, QSize, QSettings
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QPixmap, QIcon
@@ -110,6 +110,31 @@ class BatchImageResizer(QWidget):
         self.height_spin.setRange(1, 10000)
         self.height_spin.setValue(512)
         h2.addWidget(self.height_spin)
+
+        # 进度条和状态提示
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("0/0 张图 未开始")
+        self.progress_bar.setFixedHeight(24)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #555;
+                border-radius: 10px;
+                text-align: center;
+                font-size: 14px;
+                height: 24px;
+            }
+            QProgressBar::chunk {
+                background-color: #FFA500;
+                border-radius: 10px;
+            }
+        """)
+        # 移动进度条到按钮行的上一行
+        layout.addWidget(self.progress_bar)
         layout.addLayout(h2)
 
         # 输出目录
@@ -117,7 +142,7 @@ class BatchImageResizer(QWidget):
         self.output_dir_edit = DraggableLineEdit(self, dir_only=True)
         self.output_dir_edit.setPlaceholderText("可手动输入或拖拽输出目录")
         btn_output = QPushButton("选择输出目录")
-        btn_output.setStyleSheet("QPushButton { background-color: #3B82F6; color: #fff; border-radius: 8px; padding: 4px 18px; font-size: 14px; }")
+        btn_output.setStyleSheet("")
         btn_output.clicked.connect(self.select_output_dir)
         h4.addWidget(QLabel("输出目录:"))
         h4.addWidget(self.output_dir_edit)
@@ -131,6 +156,7 @@ class BatchImageResizer(QWidget):
         layout.addWidget(btn_resize)
 
         self.setLayout(layout)
+        self.update_progress_bar()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -156,11 +182,13 @@ class BatchImageResizer(QWidget):
         files, _ = QFileDialog.getOpenFileNames(self, "选择图片", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)")
         self.add_images_from_paths(files)
         self.save_settings()
+        self.update_progress_bar()
 
     def clear_images(self):
         self.image_paths = []
         self.refresh_list()
         self.save_settings()
+        self.update_progress_bar()
 
     def add_images_from_paths(self, paths):
         exts = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
@@ -179,6 +207,7 @@ class BatchImageResizer(QWidget):
         self.image_paths.extend(new_paths)
         self.refresh_list()
         self.save_settings()
+        self.update_progress_bar()
 
     def delete_selected_images(self):
         selected_items = self.list_widget.selectedItems()
@@ -192,6 +221,7 @@ class BatchImageResizer(QWidget):
         self.image_paths = [p for p in self.image_paths if p not in selected_paths]
         self.refresh_list()
         self.save_settings()
+        self.update_progress_bar()
 
     def refresh_list(self):
         self.list_widget.clear()
@@ -207,6 +237,27 @@ class BatchImageResizer(QWidget):
                 pass
             item.setToolTip(path)
             self.list_widget.addItem(item)
+        self.update_progress_bar()
+
+    def update_progress_bar(self, processed=0, total=None, status="未开始", failed=0):
+        if total is None:
+            total = len(self.image_paths)
+        if status == "未开始":
+            self.progress_bar.setMaximum(max(1, total))
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat(f"0/{total} 张图 未开始")
+        elif status == "处理中":
+            self.progress_bar.setMaximum(max(1, total))
+            self.progress_bar.setValue(processed)
+            self.progress_bar.setFormat(f"{processed}/{total} 张图 正在处理中...")
+        elif status == "全部成功":
+            self.progress_bar.setMaximum(max(1, total))
+            self.progress_bar.setValue(total)
+            self.progress_bar.setFormat(f"{total}/{total} 张图 全部成功")
+        elif status == "部分失败":
+            self.progress_bar.setMaximum(max(1, total))
+            self.progress_bar.setValue(total)
+            self.progress_bar.setFormat(f"{total}/{total} 张图 处理完成.失败{failed}张")
 
     def resize_images(self):
         if not self.image_paths:
@@ -218,18 +269,25 @@ class BatchImageResizer(QWidget):
         if not output_dir:
             QMessageBox.warning(self, "警告", "请选择输出目录")
             return
-        count = 0
-        for img_path in self.image_paths:
+        os.makedirs(output_dir, exist_ok=True)
+        total = len(self.image_paths)
+        failed = 0
+        for idx, img_path in enumerate(self.image_paths, 1):
+            self.update_progress_bar(processed=idx-1, total=total, status="处理中")
+            QApplication.processEvents()
             try:
                 img = Image.open(img_path)
                 img = img.resize((width, height), Image.LANCZOS)
                 base = os.path.basename(img_path)
                 out_path = os.path.join(output_dir, base)
                 img.save(out_path)
-                count += 1
             except Exception as e:
                 print(f"处理失败: {img_path}, 错误: {e}")
-        QMessageBox.information(self, "完成", f"已处理 {count} 张图片")
+                failed += 1
+        if failed == 0:
+            self.update_progress_bar(processed=total, total=total, status="全部成功")
+        else:
+            self.update_progress_bar(processed=total, total=total, status="部分失败", failed=failed)
 
     def save_settings(self):
         self.settings.setValue("output_dir", self.output_dir_edit.text())
